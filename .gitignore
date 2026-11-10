@@ -1,0 +1,29 @@
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Environment variables
+.env
+
+# Airflow
+airflow.db/
+airflow.cfg/
+webserver_config.py
+
+# Logs
+logs/
+*.log
+
+# Data
+data/*.csv
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
