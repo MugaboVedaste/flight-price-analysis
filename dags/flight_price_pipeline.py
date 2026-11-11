@@ -1,6 +1,7 @@
 
 from datetime import timedelta
 from pathlib import Path
+import os
 
 import pendulum
 
@@ -31,6 +32,15 @@ TRANSFORMED_CSV_PATH = (
 MYSQL_CONN_ID = "mysql_flight_staging"
 POSTGRES_CONN_ID = "postgres_flight_analytics"
 
+ALERT_EMAIL = os.getenv("GMAIL_ADDRESS")
+ALERT_EMAIL_PASSWORD = os.getenv("GMAIL_PASSWORD")
+
+if not ALERT_EMAIL:
+    raise RuntimeError("GMAIL_ADDRESS is not configured.")
+
+if not ALERT_EMAIL_PASSWORD:
+    raise RuntimeError("GMAIL_PASSWORD is not configured.")
+
 
 @dag(
     dag_id="flight_price_pipeline",
@@ -43,6 +53,9 @@ POSTGRES_CONN_ID = "postgres_flight_analytics"
         "owner": "data-engineering",
         "retries": 2,
         "retry_delay": timedelta(minutes=2),
+        "email": [ALERT_EMAIL],
+        "email_on_failure": True,
+        "email_on_retry": False,
     },
     tags=["flight-price-analysis", "data-engineering"],
     doc_md="""
