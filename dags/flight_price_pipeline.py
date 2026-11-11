@@ -6,12 +6,15 @@ import pendulum
 
 from airflow.sdk import dag, task
 from airflow.providers.mysql.hooks.mysql import MySqlHook
+from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 from src.ingestion.mysql_loader import load_csv_to_mysql
 from src.validation.data_quality import (
     run_data_quality_checks,
     print_quality_report,
 )
+from src.transformation.run_transformation import run_transformation
+from src.loading.postgres_loader import load_transformed_csv
 
 
 CSV_PATH = (
@@ -19,12 +22,19 @@ CSV_PATH = (
     / "Flight_Price_Dataset_of_Bangladesh.csv"
 )
 
+TRANSFORMED_CSV_PATH = (
+    Path("/opt/airflow/data")
+    / "processed"
+    / "transformed_flight_prices.csv"
+)
+
 MYSQL_CONN_ID = "mysql_flight_staging"
+POSTGRES_CONN_ID = "postgres_flight_analytics"
 
 
 @dag(
     dag_id="flight_price_pipeline",
-    description="Ingest and validate flight price data",
+    description="End-to-end flight price data engineering pipeline",
     start_date=pendulum.datetime(2026, 11, 11, tz="UTC"),
     schedule=None,
     catchup=False,
@@ -35,6 +45,65 @@ MYSQL_CONN_ID = "mysql_flight_staging"
         "retry_delay": timedelta(minutes=2),
     },
     tags=["flight-price-analysis", "data-engineering"],
+    doc_md="""
+# Flight Price Analysis Pipeline
+
+## Overview
+
+This DAG orchestrates an end-to-end data engineering pipeline
+that processes flight price data from Bangladesh.
+
+The workflow extracts raw flight records, validates data quality,
+transforms the records, and loads processed data into PostgreSQL
+for analytical purposes.
+
+## Pipeline Architecture
+
+**Source:** Bangladesh Flight Price CSV Dataset
+
+**Staging:** MySQL (`flight_staging`)
+
+**Transformation:** Python data processing
+
+**Destination:** PostgreSQL (`flight_analytics`)
+
+## Tasks
+
+1. **ingest_flight_data**
+   - Reads flight records from the source CSV.
+   - Loads records into the MySQL staging database.
+
+2. **validate_flight_data**
+   - Checks missing critical values.
+   - Identifies invalid fares and durations.
+   - Reports fare discrepancies.
+
+3. **transform_flight_data**
+   - Processes records in batches.
+   - Extracts departure date features.
+   - Classifies peak and non-peak seasons.
+   - Groups booking lead times.
+   - Calculates expected fares and identifies discrepancies.
+
+4. **load_postgres_data**
+   - Loads transformed records into PostgreSQL.
+   - Uses source record IDs to prevent duplicate inserts.
+
+## Data Quality
+
+Critical validation checks must pass before transformation.
+
+Fare discrepancies are reported as warnings and preserved
+for further investigation.
+
+## Technologies
+
+- Apache Airflow
+- Python
+- MySQL
+- PostgreSQL
+- Docker
+""",
 )
 def flight_price_pipeline():
 
@@ -137,9 +206,202 @@ def flight_price_pipeline():
             connection.close()
             print("MySQL connection closed.")
 
-    # Define task dependencies.
-    loaded_records = ingest_flight_data()
-    validate_flight_data(loaded_records)
+    @task
+    def transform_flight_data(validation_result: dict):
+
+        print("Starting flight data transformation...")
+
+        hook = MySqlHook(mysql_conn_id=MYSQL_CONN_ID)
+        connection = hook.get_conn()
+
+        try:
+            print("Connected to MySQL successfully.")
+
+            result = run_transformation(
+                connection=connection,
+                output_path=TRANSFORMED_CSV_PATH,
+            )
+
+            if (
+                result["total_processed"]
+                != validation_result["total_records"]
+            ):
+                raise RuntimeError(
+                    "Transformation record count mismatch: "
+                    f"validated={validation_result['total_records']}, "
+                    f"transformed={result['total_processed']}"
+                )
+
+            print("TRANSFORMATION TASK COMPLETED.")
+
+            return result
+
+        finally:
+            connection.close()
+            print("MySQL connection closed.")
+
+    @task
+    def load_postgres_data(transformation_result: dict):
+
+        print("Starting PostgreSQL loading...")
+
+        transformed_file = Path(
+            transformation_result["output_path"]
+        )
+
+        if not transformed_file.exists():
+            raise FileNotFoundError(
+                f"Transformed CSV not found: {transformed_file}"
+            )
+
+        hook = PostgresHook(
+            postgres_conn_id=POSTGRES_CONN_ID
+        )
+        connection = hook.get_conn()
+
+        try:
+            print("Connected to PostgreSQL successfully.")
+
+            result = load_transformed_csv(
+                csv_path=transformed_file,
+                connection=connection,
+                batch_size=1000,
+            )
+
+            if (
+                result["total_read"]
+                != transformation_result["total_processed"]
+            ):
+                raise RuntimeError(
+                    "PostgreSQL loading record count mismatch: "
+                    f"transformed={transformation_result['total_processed']}, "
+                    f"read={result['total_read']}"
+                )
+
+            print("POSTGRESQL LOADING TASK COMPLETED.")
+
+            return result
+
+        finally:
+            connection.close()
+            print("PostgreSQL connection closed.")
+
+    # --------------------------------------------------
+    # Define tasks and dependencies
+    # --------------------------------------------------
+
+    ingestion_task = ingest_flight_data()
+
+    validation_task = validate_flight_data(
+        ingestion_task
+    )
+
+    transformation_task = transform_flight_data(
+        validation_task
+    )
+
+    postgres_task = load_postgres_data(
+        transformation_task
+    )
+
+    # --------------------------------------------------
+    # Individual task documentation
+    # --------------------------------------------------
+
+    ingestion_task.operator.doc_md = """
+### Flight Data Ingestion
+
+**Purpose:** Load raw flight price records from the source CSV into MySQL.
+
+**Source:**
+- `Flight_Price_Dataset_of_Bangladesh.csv`
+
+**Destination:**
+- MySQL staging database
+- Table: `raw_flight_prices`
+
+**Processing:**
+1. Verify the source CSV exists.
+2. Connect using `mysql_flight_staging`.
+3. Load records in batches of 1,000.
+4. Return the number of ingested records.
+
+**Failure conditions:**
+- Missing source file.
+- MySQL connection failure.
+- Database insertion error.
+"""
+
+    validation_task.operator.doc_md = """
+### Flight Data Quality Validation
+
+**Purpose:** Validate the integrity and consistency of staged flight records.
+
+**Database:** MySQL (`flight_staging`)
+
+**Validation checks:**
+- Missing critical values.
+- Invalid flight fares.
+- Invalid flight durations.
+- Fare discrepancies between total fare and expected fare.
+
+**Execution:**
+1. Retrieve data-quality statistics.
+2. Compare staged records with ingested records.
+3. Fail if critical checks detect invalid records.
+4. Report fare discrepancies as warnings.
+
+**Output:** Data-quality summary passed to the transformation task.
+"""
+
+    transformation_task.operator.doc_md = """
+### Flight Data Transformation
+
+**Purpose:** Transform validated MySQL staging records into an analytics-ready dataset.
+
+**Processing:**
+- Normalize flight attributes.
+- Extract departure hour, day, month and year.
+- Classify peak and non-peak seasons.
+- Group booking lead times.
+- Calculate expected fares.
+- Calculate and flag fare discrepancies.
+
+**Batch size:** 1,000 records.
+
+**Output:**
+- `data/processed/transformed_flight_prices.csv`
+
+**Quality control:**
+Confirm that the number of transformed records matches
+the number of validated records.
+"""
+
+    postgres_task.operator.doc_md = """
+### PostgreSQL Analytics Loading
+
+**Purpose:** Load transformed flight records into the PostgreSQL analytics database.
+
+**Source:**
+- `transformed_flight_prices.csv`
+
+**Destination:**
+- Database: `flight_analytics`
+- Schema: `flight_analytics`
+- Table: `transformed_flight_prices`
+
+**Processing:**
+1. Verify the transformed CSV exists.
+2. Establish a PostgreSQL connection.
+3. Convert CSV values into appropriate Python data types.
+4. Insert records in batches of 1,000.
+5. Skip duplicate source record IDs using `ON CONFLICT DO NOTHING`.
+6. Commit the transaction.
+
+**Quality control:**
+Confirm that the number of records read matches
+the number of records transformed.
+"""
 
 
 flight_price_pipeline()
