@@ -30,8 +30,15 @@ NEW_COLUMNS = [
 ]
 
 
-def run_transformation():
-    connection = None
+def run_transformation(connection=None, output_path=OUTPUT_PATH):
+    """
+    Transform MySQL staging records and write a processed CSV.
+
+    A connection can be injected by Airflow.
+    If no connection is supplied, use the local database configuration.
+    """
+
+    owns_connection = connection is None
     cursor = None
 
     total_processed = 0
@@ -40,11 +47,12 @@ def run_transformation():
     try:
         print("Starting flight data transformation...")
 
-        connection = get_mysql_connection()
+        if owns_connection:
+            connection = get_mysql_connection()
+
         print("Connected to MySQL successfully.")
 
-        cursor = connection.cursor(dictionary=True)
-
+        cursor = connection.cursor()
         cursor.execute("SELECT * FROM raw_flight_prices")
 
         source_columns = [
@@ -53,13 +61,10 @@ def run_transformation():
 
         fieldnames = source_columns + NEW_COLUMNS
 
-        OUTPUT_PATH.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with open(
-            OUTPUT_PATH,
+        with output_path.open(
             mode="w",
             newline="",
             encoding="utf-8",
@@ -73,10 +78,15 @@ def run_transformation():
             writer.writeheader()
 
             while True:
-                records = cursor.fetchmany(BATCH_SIZE)
+                rows = cursor.fetchmany(BATCH_SIZE)
 
-                if not records:
+                if not rows:
                     break
+
+                records = [
+                    dict(zip(source_columns, row))
+                    for row in rows
+                ]
 
                 transformed_records = transform_flight_records(
                     records
@@ -99,13 +109,21 @@ def run_transformation():
         print("\n========== TRANSFORMATION REPORT ==========")
         print(f"Total records processed: {total_processed:,}")
         print(f"Fare discrepancies: {discrepancy_count:,}")
-        print(
-            f"Discrepancy percentage: "
-            f"{(discrepancy_count / total_processed * 100):.2f}%"
-            if total_processed else "Discrepancy percentage: N/A"
+
+        percentage = (
+            discrepancy_count / total_processed * 100
+            if total_processed else 0
         )
-        print(f"Output file: {OUTPUT_PATH}")
+
+        print(f"Discrepancy percentage: {percentage:.2f}%")
+        print(f"Output file: {output_path}")
         print("TRANSFORMATION COMPLETED SUCCESSFULLY.")
+
+        return {
+            "total_processed": total_processed,
+            "discrepancy_count": discrepancy_count,
+            "output_path": str(output_path),
+        }
 
     except Exception as error:
         print(f"TRANSFORMATION FAILED: {error}")
@@ -115,7 +133,9 @@ def run_transformation():
         if cursor:
             cursor.close()
 
-        if connection and connection.is_connected():
+        # Only close connections created by this function.
+        # Airflow manages injected connections.
+        if owns_connection and connection:
             connection.close()
             print("MySQL connection closed.")
 

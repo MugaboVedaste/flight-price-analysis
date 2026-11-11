@@ -18,7 +18,6 @@ INPUT_PATH = (
 
 BATCH_SIZE = 1000
 
-# CSV column -> PostgreSQL column
 COLUMN_MAPPING = {
     "id": "source_record_id",
     "airline": "airline",
@@ -80,8 +79,6 @@ BOOLEAN_COLUMNS = {
 
 
 def convert_value(column, value):
-    """Convert CSV values into appropriate Python types."""
-
     if value is None or value.strip() == "":
         return None
 
@@ -116,8 +113,6 @@ def convert_value(column, value):
 
 
 def build_insert_query():
-    """Build a parameterized PostgreSQL INSERT query."""
-
     columns = list(COLUMN_MAPPING.values())
 
     column_sql = ", ".join(columns)
@@ -134,8 +129,14 @@ def build_insert_query():
 def load_transformed_csv(
     csv_path=INPUT_PATH,
     batch_size=BATCH_SIZE,
+    connection=None,
 ):
-    """Load transformed flight records into PostgreSQL."""
+    """
+    Load transformed CSV records into PostgreSQL.
+
+    A connection can be injected by Airflow.
+    If no connection is supplied, use the local database configuration.
+    """
 
     csv_path = Path(csv_path)
 
@@ -145,9 +146,11 @@ def load_transformed_csv(
         )
 
     if batch_size <= 0:
-        raise ValueError("Batch size must be greater than zero.")
+        raise ValueError(
+            "Batch size must be greater than zero."
+        )
 
-    connection = None
+    owns_connection = connection is None
     cursor = None
 
     total_read = 0
@@ -159,10 +162,12 @@ def load_transformed_csv(
     try:
         print("Starting PostgreSQL data loading...")
 
-        connection = get_postgres_connection()
-        cursor = connection.cursor()
+        if owns_connection:
+            connection = get_postgres_connection()
 
         print("Connected to PostgreSQL successfully.")
+
+        cursor = connection.cursor()
 
         with csv_path.open(
             mode="r",
@@ -199,15 +204,12 @@ def load_transformed_csv(
                     total_inserted += inserted
                     total_skipped += len(batch) - inserted
 
-                    connection.commit()
-
                     print(
                         f"Processed {total_read:,} records..."
                     )
 
                     batch.clear()
 
-            # Insert the remaining records.
             if batch:
                 cursor.executemany(insert_query, batch)
 
@@ -215,13 +217,17 @@ def load_transformed_csv(
                 total_inserted += inserted
                 total_skipped += len(batch) - inserted
 
-                connection.commit()
+        # Commit the complete load as one transaction.
+        connection.commit()
 
         print("\n========== POSTGRESQL LOADING REPORT ==========")
         print(f"Total records read: {total_read:,}")
         print(f"Records inserted: {total_inserted:,}")
         print(f"Duplicate records skipped: {total_skipped:,}")
-        print(f"Target table: flight_analytics.transformed_flight_prices")
+        print(
+            "Target table: "
+            "flight_analytics.transformed_flight_prices"
+        )
         print("POSTGRESQL LOADING COMPLETED SUCCESSFULLY.")
 
         return {
@@ -241,6 +247,11 @@ def load_transformed_csv(
         if cursor:
             cursor.close()
 
-        if connection:
+        # Airflow owns connections passed into this function.
+        if owns_connection and connection:
             connection.close()
             print("PostgreSQL connection closed.")
+
+
+if __name__ == "__main__":
+    load_transformed_csv()
