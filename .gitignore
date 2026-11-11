@@ -19,6 +19,7 @@ logs/
 
 # Data
 data/*.csv
+data/processed/
 
 # IDE
 .vscode/
