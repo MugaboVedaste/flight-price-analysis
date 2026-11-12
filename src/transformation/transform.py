@@ -2,6 +2,8 @@
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Mapping
+import hashlib
+import json
 
 
 # Business rule: these seasons are classified as peak periods.
@@ -72,6 +74,60 @@ def to_decimal(value: Any) -> Decimal | None:
         return Decimal(str(value))
     except (InvalidOperation, ValueError, TypeError):
         raise ValueError(f"Invalid numeric value: {value!r}")
+
+def generate_record_hash(record: Mapping[str, Any]) -> str:
+    """
+    Generate a deterministic SHA-256 hash for a flight record.
+
+    Excludes generated IDs and ingestion timestamps.
+    """
+
+    business_columns = (
+        "airline",
+        "source_code",
+        "source_name",
+        "destination_code",
+        "destination_name",
+        "departure_datetime",
+        "arrival_datetime",
+        "duration_hours",
+        "stopovers",
+        "aircraft_type",
+        "booking_class",
+        "booking_source",
+        "base_fare_bdt",
+        "tax_surcharge_bdt",
+        "total_fare_bdt",
+        "seasonality",
+        "days_before_departure",
+    )
+
+    canonical_record = {}
+
+    for column in business_columns:
+        value = record.get(column)
+
+        if isinstance(value, Decimal):
+            value = format(value.normalize(), "f")
+
+        elif isinstance(value, datetime):
+            value = value.isoformat(timespec="seconds")
+
+        elif value is not None:
+            value = str(value)
+
+        canonical_record[column] = value
+
+    serialized_record = json.dumps(
+        canonical_record,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+
+    return hashlib.sha256(
+        serialized_record.encode("utf-8")
+    ).hexdigest()
 
 
 def classify_peak_season(seasonality: Any) -> bool | None:
@@ -210,6 +266,10 @@ def transform_flight_record(record: Mapping[str, Any]) -> dict:
     )
 
     transformed.update(fare_metrics)
+        # Generate a stable identifier for duplicate detection.
+    transformed["record_hash"] = generate_record_hash(
+        transformed
+    )
 
     return transformed
 

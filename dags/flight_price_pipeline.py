@@ -129,6 +129,8 @@ failure_email = SmtpNotifier(
         Fare discrepancies are reported as warnings and preserved
         for further investigation.
 
+        - The pipeline includes a hash of the record to detect duplicates.
+
         ## Failure Handling
 
         - Each task has a maximum of two retries.

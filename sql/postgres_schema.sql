@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS flight_analytics.transformed_flight_prices (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
 
     source_record_id BIGINT UNIQUE NOT NULL,
+    record_hash CHAR(64) UNIQUE NOT NULL,
 
     airline VARCHAR(100),
     source_code VARCHAR(10),
