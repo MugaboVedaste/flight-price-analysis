@@ -5,7 +5,6 @@ import os
 
 import pendulum
 
-from airflow.sdk import dag, task
 from airflow.providers.mysql.hooks.mysql import MySqlHook
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.providers.smtp.notifications.smtp import SmtpNotifier
@@ -38,6 +37,7 @@ ALERT_EMAIL = os.getenv("GMAIL_ADDRESS")
 if not ALERT_EMAIL:
     raise RuntimeError("GMAIL_ADDRESS is not configured.")
 
+
 failure_email = SmtpNotifier(
     smtp_conn_id="smtp_default",
     from_email=ALERT_EMAIL,
@@ -49,20 +49,24 @@ failure_email = SmtpNotifier(
     <p><strong>DAG:</strong> {{ dag.dag_id }}</p>
     <p><strong>Failed task:</strong> {{ ti.task_id }}</p>
     <p><strong>Execution date:</strong> {{ logical_date }}</p>
-    <p><strong>Error:</strong> {{ exception }}</p>
+    <p><strong>Attempt:</strong> {{ ti.try_number }}</p>
+    <p><strong>Error:</strong></p>
+    <pre>{{ exception }}</pre>
 
     <p>
-        <strong>Airflow task log:</strong>
-        <a href="{{ ti.log_url }}">View task logs</a>
+        <strong>Task logs:</strong>
+        <a href="{{ ti.log_url }}">View Airflow logs</a>
     </p>
     """,
 )
+
 
 
 @dag(
     dag_id="flight_price_pipeline",
     description="End-to-end flight price data engineering pipeline",
     start_date=pendulum.datetime(2026, 11, 11, tz="UTC"),
+    dagrun_timeout=timedelta(hours=2),
     schedule=None,
     catchup=False,
     max_active_runs=1,
@@ -124,6 +128,14 @@ failure_email = SmtpNotifier(
 
         Fare discrepancies are reported as warnings and preserved
         for further investigation.
+
+        ## Failure Handling
+
+        - Each task has a maximum of two retries.
+        - Retry delay is two minutes.
+        - Failure notifications are sent after the final failed attempt.
+        - Notifications are delivered through Gmail SMTP.
+        - Email alerts include task information and a link to Airflow logs.
 
         ## Technologies
 
