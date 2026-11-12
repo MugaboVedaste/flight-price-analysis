@@ -4,7 +4,7 @@ from pathlib import Path
 import os
 
 import pendulum
-
+from airflow.sdk import dag, task
 from airflow.providers.mysql.hooks.mysql import MySqlHook
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.providers.smtp.notifications.smtp import SmtpNotifier
@@ -16,6 +16,7 @@ from src.validation.data_quality import (
 )
 from src.transformation.run_transformation import run_transformation
 from src.loading.postgres_loader import load_transformed_csv
+from src.analytics.run_analytics import main as run_analytics
 
 
 CSV_PATH = (
@@ -328,6 +329,49 @@ def flight_price_pipeline():
         finally:
             connection.close()
             print("PostgreSQL connection closed.")
+    @task
+    def run_flight_analytics():
+
+        print("Starting flight price analytics...")
+
+        hook = PostgresHook(
+            postgres_conn_id=POSTGRES_CONN_ID
+        )
+
+        connection = hook.get_conn()
+
+        try:
+            print("Connected to PostgreSQL successfully.")
+
+            results = run_analytics(connection=connection)
+
+            summary = {
+                "status": "completed",
+                "airlines_analyzed": len(
+                    results["average_fare_by_airline"]
+                ),
+                "routes_analyzed": len(
+                    results["most_popular_routes"]
+                ),
+                "booking_lead_time_groups": len(
+                    results["fare_by_booking_lead_time"]
+                ),
+                "peak_flight_count": int(
+                    results["peak_vs_non_peak_fare"]["peak_flight_count"]
+                ),
+                "non_peak_flight_count": int(
+                    results["peak_vs_non_peak_fare"]["non_peak_flight_count"]
+                ),
+            }
+
+            print("FLIGHT PRICE ANALYTICS COMPLETED.")
+            print(f"Analytics summary: {summary}")
+
+            return summary
+
+        finally:
+            connection.close()
+            print("PostgreSQL connection closed.")
 
     # --------------------------------------------------
     # Define tasks and dependencies
@@ -352,99 +396,97 @@ def flight_price_pipeline():
     # --------------------------------------------------
 
     ingestion_task.operator.doc_md = """
-### Flight Data Ingestion
+    ### Flight Data Ingestion
 
-**Purpose:** Load raw flight price records from the source CSV into MySQL.
+    **Purpose:** Load raw flight price records from the source CSV into MySQL.
 
-**Source:**
-- `Flight_Price_Dataset_of_Bangladesh.csv`
+    **Source:**
+    - `Flight_Price_Dataset_of_Bangladesh.csv`
 
-**Destination:**
-- MySQL staging database
-- Table: `raw_flight_prices`
+    **Destination:**
+    - MySQL staging database
+    - Table: `raw_flight_prices`
 
-**Processing:**
-1. Verify the source CSV exists.
-2. Connect using `mysql_flight_staging`.
-3. Load records in batches of 1,000.
-4. Return the number of ingested records.
+    **Processing:**
+    1. Verify the source CSV exists.
+    2. Connect using `mysql_flight_staging`.
+    3. Load records in batches of 1,000.
+    4. Return the number of ingested records.
 
-**Failure conditions:**
-- Missing source file.
-- MySQL connection failure.
-- Database insertion error.
-"""
+    **Failure conditions:**
+    - Missing source file.
+    - MySQL connection failure.
+    - Database insertion error.
+    """
 
     validation_task.operator.doc_md = """
-### Flight Data Quality Validation
+    ### Flight Data Quality Validation
 
-**Purpose:** Validate the integrity and consistency of staged flight records.
+    **Purpose:** Validate the integrity and consistency of staged flight records.
 
-**Database:** MySQL (`flight_staging`)
+    **Database:** MySQL (`flight_staging`)
 
-**Validation checks:**
-- Missing critical values.
-- Invalid flight fares.
-- Invalid flight durations.
-- Fare discrepancies between total fare and expected fare.
+    **Validation checks:**
+    - Missing critical values.
+    - Invalid flight fares.
+    - Invalid flight durations.
+    - Fare discrepancies between total fare and expected fare.
 
-**Execution:**
-1. Retrieve data-quality statistics.
-2. Compare staged records with ingested records.
-3. Fail if critical checks detect invalid records.
-4. Report fare discrepancies as warnings.
+    **Execution:**
+    1. Retrieve data-quality statistics.
+    2. Compare staged records with ingested records.
+    3. Fail if critical checks detect invalid records.
+    4. Report fare discrepancies as warnings.
 
-**Output:** Data-quality summary passed to the transformation task.
-"""
-
+    **Output:** Data-quality summary passed to the transformation task.
+    """
     transformation_task.operator.doc_md = """
-### Flight Data Transformation
+    ### Flight Data Transformation
 
-**Purpose:** Transform validated MySQL staging records into an analytics-ready dataset.
+    **Purpose:** Transform validated MySQL staging records into an analytics-ready dataset.
 
-**Processing:**
-- Normalize flight attributes.
-- Extract departure hour, day, month and year.
-- Classify peak and non-peak seasons.
-- Group booking lead times.
-- Calculate expected fares.
-- Calculate and flag fare discrepancies.
+    **Processing:**
+    - Normalize flight attributes.
+    - Extract departure hour, day, month and year.
+    - Classify peak and non-peak seasons.
+    - Group booking lead times.
+    - Calculate expected fares.
+    - Calculate and flag fare discrepancies.
 
-**Batch size:** 1,000 records.
+    **Batch size:** 1,000 records.
 
-**Output:**
-- `data/processed/transformed_flight_prices.csv`
+    **Output:**
+    - `data/processed/transformed_flight_prices.csv`
 
-**Quality control:**
-Confirm that the number of transformed records matches
-the number of validated records.
-"""
-
+    **Quality control:**
+    Confirm that the number of transformed records matches
+    the number of validated records.
+    """
     postgres_task.operator.doc_md = """
-### PostgreSQL Analytics Loading
+    ### PostgreSQL Analytics Loading
 
-**Purpose:** Load transformed flight records into the PostgreSQL analytics database.
+    **Purpose:** Load transformed flight records into the PostgreSQL analytics database.
 
-**Source:**
-- `transformed_flight_prices.csv`
+    **Source:**
+    - `transformed_flight_prices.csv`
 
-**Destination:**
-- Database: `flight_analytics`
-- Schema: `flight_analytics`
-- Table: `transformed_flight_prices`
+    **Destination:**
+    - Database: `flight_analytics`
+    - Schema: `flight_analytics`
+    - Table: `transformed_flight_prices`
 
-**Processing:**
-1. Verify the transformed CSV exists.
-2. Establish a PostgreSQL connection.
-3. Convert CSV values into appropriate Python data types.
-4. Insert records in batches of 1,000.
-5. Skip duplicate source record IDs using `ON CONFLICT DO NOTHING`.
-6. Commit the transaction.
+    **Processing:**
+    1. Verify the transformed CSV exists.
+    2. Establish a PostgreSQL connection.
+    3. Convert CSV values into appropriate Python data types.
+    4. Insert records in batches of 1,000.
+    5. Skip duplicate source record IDs using `ON CONFLICT DO NOTHING`.
+    6. Commit the transaction.
 
-**Quality control:**
-Confirm that the number of records read matches
-the number of records transformed.
-"""
+    **Quality control:**
+    Confirm that the number of records read matches
+    the number of records transformed.
+    """
 
 
 flight_price_pipeline()

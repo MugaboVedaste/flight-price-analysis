@@ -1,9 +1,26 @@
 from config.database import get_postgres_connection
 
 
-def get_average_fare_by_airline():
+def _get_connection(connection):
+    """
+    Use the supplied connection or create a local PostgreSQL connection.
+
+    Returns:
+        tuple: (connection, should_close)
+    """
+    if connection is not None:
+        return connection, False
+
+    return get_postgres_connection(), True
+
+
+
+def get_average_fare_by_airline(connection=None):
     """
     Calculate average, minimum, and maximum flight fares per airline.
+
+    Args:
+        connection: Optional existing PostgreSQL connection.
 
     Returns:
         list[dict]: Fare statistics grouped by airline.
@@ -21,7 +38,7 @@ def get_average_fare_by_airline():
         ORDER BY average_fare_bdt DESC;
     """
 
-    connection = get_postgres_connection()
+    connection, should_close = _get_connection(connection)
 
     try:
         with connection.cursor() as cursor:
@@ -36,10 +53,13 @@ def get_average_fare_by_airline():
             ]
 
     finally:
-        connection.close()
+        if should_close:
+            connection.close()
 
 
-def get_peak_vs_non_peak_fare():
+
+
+def get_peak_vs_non_peak_fare(connection=None):
     """
     Compare average flight fares between peak and non-peak seasons.
 
@@ -72,7 +92,7 @@ def get_peak_vs_non_peak_fare():
         FROM flight_analytics.transformed_flight_prices;
     """
 
-    connection = get_postgres_connection()
+    connection, should_close = _get_connection(connection)
 
     try:
         with connection.cursor() as cursor:
@@ -97,10 +117,11 @@ def get_peak_vs_non_peak_fare():
             }
 
     finally:
-        connection.close()
+        if should_close:
+            connection.close()
 
 
-def get_flight_count_by_airline():
+def get_flight_count_by_airline(connection=None):
     """
     Calculate flight record counts and percentage distribution by airline.
 
@@ -121,7 +142,7 @@ def get_flight_count_by_airline():
         ORDER BY flight_count DESC;
     """
 
-    connection = get_postgres_connection()
+    connection, should_close = _get_connection(connection)
 
     try:
         with connection.cursor() as cursor:
@@ -136,10 +157,12 @@ def get_flight_count_by_airline():
             ]
 
     finally:
-        connection.close()
+        if should_close:
+            connection.close()
 
 
-def get_most_popular_routes(limit=15):
+
+def get_most_popular_routes(limit=15, connection=None):
     """
     Identify the most frequently recorded source-destination routes.
 
@@ -171,7 +194,7 @@ def get_most_popular_routes(limit=15):
         LIMIT %s;
     """
 
-    connection = get_postgres_connection()
+    connection, should_close = _get_connection(connection)
 
     try:
         with connection.cursor() as cursor:
@@ -186,11 +209,13 @@ def get_most_popular_routes(limit=15):
             ]
 
     finally:
-        connection.close()
+        if should_close:
+            connection.close()
 
 
 
-def get_fare_by_booking_lead_time():
+
+def get_fare_by_booking_lead_time(connection=None):
     """
     Analyze flight fares across booking lead-time categories.
 
@@ -219,7 +244,7 @@ def get_fare_by_booking_lead_time():
             END;
     """
 
-    connection = get_postgres_connection()
+    connection, should_close = _get_connection(connection)
 
     try:
         with connection.cursor() as cursor:
@@ -234,4 +259,5 @@ def get_fare_by_booking_lead_time():
             ]
 
     finally:
-        connection.close()
+        if should_close:
+            connection.close()

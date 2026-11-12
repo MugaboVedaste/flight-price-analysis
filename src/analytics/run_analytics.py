@@ -8,15 +8,15 @@ from src.analytics.kpi_queries import (
 )
 
 
-def main():
+def main(connection=None):
     """Execute all flight price analytics KPIs."""
 
     results = {
-        "average_fare_by_airline": get_average_fare_by_airline(),
-        "peak_vs_non_peak_fare": get_peak_vs_non_peak_fare(),
-        "flight_count_by_airline": get_flight_count_by_airline(),
-        "most_popular_routes": get_most_popular_routes(),
-        "fare_by_booking_lead_time": get_fare_by_booking_lead_time(),
+        "average_fare_by_airline": get_average_fare_by_airline(connection=connection),
+        "peak_vs_non_peak_fare": get_peak_vs_non_peak_fare(connection=connection),
+        "flight_count_by_airline": get_flight_count_by_airline(connection=connection),
+        "most_popular_routes": get_most_popular_routes(connection=connection),
+        "fare_by_booking_lead_time": get_fare_by_booking_lead_time(connection=connection),
     }
 
     print("\n========== FLIGHT PRICE ANALYTICS ==========\n")
