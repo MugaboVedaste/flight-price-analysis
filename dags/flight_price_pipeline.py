@@ -391,6 +391,10 @@ def flight_price_pipeline():
         transformation_task
     )
 
+    analytics_task = run_flight_analytics()
+    # Analytics runs only after PostgreSQL loading succeeds.
+    postgres_task >> analytics_task
+
     # --------------------------------------------------
     # Individual task documentation
     # --------------------------------------------------

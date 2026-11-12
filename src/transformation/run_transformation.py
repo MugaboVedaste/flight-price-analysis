@@ -27,6 +27,7 @@ NEW_COLUMNS = [
     "expected_fare_bdt",
     "fare_discrepancy_bdt",
     "fare_discrepancy_flag",
+    "record_hash",
 ]
 
 
