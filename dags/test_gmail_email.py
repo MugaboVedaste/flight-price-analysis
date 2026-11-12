@@ -3,6 +3,7 @@ from datetime import datetime
 
 from airflow.sdk import dag, task
 from airflow.providers.smtp.utils.emailer import send_email_smtp
+from airflow.providers.smtp.notifications.smtp import SmtpNotifier
 
 import os
 

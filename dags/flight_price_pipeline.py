@@ -8,6 +8,7 @@ import pendulum
 from airflow.sdk import dag, task
 from airflow.providers.mysql.hooks.mysql import MySqlHook
 from airflow.providers.postgres.hooks.postgres import PostgresHook
+from airflow.providers.smtp.notifications.smtp import SmtpNotifier
 
 from src.ingestion.mysql_loader import load_csv_to_mysql
 from src.validation.data_quality import (
@@ -33,13 +34,29 @@ MYSQL_CONN_ID = "mysql_flight_staging"
 POSTGRES_CONN_ID = "postgres_flight_analytics"
 
 ALERT_EMAIL = os.getenv("GMAIL_ADDRESS")
-ALERT_EMAIL_PASSWORD = os.getenv("GMAIL_PASSWORD")
 
 if not ALERT_EMAIL:
     raise RuntimeError("GMAIL_ADDRESS is not configured.")
 
-if not ALERT_EMAIL_PASSWORD:
-    raise RuntimeError("GMAIL_PASSWORD is not configured.")
+failure_email = SmtpNotifier(
+    smtp_conn_id="smtp_default",
+    from_email=ALERT_EMAIL,
+    to=ALERT_EMAIL,
+    subject="[Airflow Failure] {{ dag.dag_id }} - {{ ti.task_id }}",
+    html_content="""
+    <h2>Flight Price Pipeline Failure</h2>
+
+    <p><strong>DAG:</strong> {{ dag.dag_id }}</p>
+    <p><strong>Failed task:</strong> {{ ti.task_id }}</p>
+    <p><strong>Execution date:</strong> {{ logical_date }}</p>
+    <p><strong>Error:</strong> {{ exception }}</p>
+
+    <p>
+        <strong>Airflow task log:</strong>
+        <a href="{{ ti.log_url }}">View task logs</a>
+    </p>
+    """,
+)
 
 
 @dag(
@@ -53,71 +70,70 @@ if not ALERT_EMAIL_PASSWORD:
         "owner": "data-engineering",
         "retries": 2,
         "retry_delay": timedelta(minutes=2),
-        "email": [ALERT_EMAIL],
-        "email_on_failure": True,
-        "email_on_retry": False,
+        "on_failure_callback": failure_email,
     },
+
     tags=["flight-price-analysis", "data-engineering"],
     doc_md="""
-# Flight Price Analysis Pipeline
+        # Flight Price Analysis Pipeline
 
-## Overview
+        ## Overview
 
-This DAG orchestrates an end-to-end data engineering pipeline
-that processes flight price data from Bangladesh.
+        This DAG orchestrates an end-to-end data engineering pipeline
+        that processes flight price data from Bangladesh.
 
-The workflow extracts raw flight records, validates data quality,
-transforms the records, and loads processed data into PostgreSQL
-for analytical purposes.
+        The workflow extracts raw flight records, validates data quality,
+        transforms the records, and loads processed data into PostgreSQL
+        for analytical purposes.
 
-## Pipeline Architecture
+        ## Pipeline Architecture
 
-**Source:** Bangladesh Flight Price CSV Dataset
+        **Source:** Bangladesh Flight Price CSV Dataset
 
-**Staging:** MySQL (`flight_staging`)
+        **Staging:** MySQL (`flight_staging`)
 
-**Transformation:** Python data processing
+        **Transformation:** Python data processing
 
-**Destination:** PostgreSQL (`flight_analytics`)
+        **Destination:** PostgreSQL (`flight_analytics`)
 
-## Tasks
+        ## Tasks
 
-1. **ingest_flight_data**
-   - Reads flight records from the source CSV.
-   - Loads records into the MySQL staging database.
+        1. **ingest_flight_data**
+        - Reads flight records from the source CSV.
+        - Loads records into the MySQL staging database.
 
-2. **validate_flight_data**
-   - Checks missing critical values.
-   - Identifies invalid fares and durations.
-   - Reports fare discrepancies.
+        2. **validate_flight_data**
+        - Checks missing critical values.
+        - Identifies invalid fares and durations.
+        - Reports fare discrepancies.
 
-3. **transform_flight_data**
-   - Processes records in batches.
-   - Extracts departure date features.
-   - Classifies peak and non-peak seasons.
-   - Groups booking lead times.
-   - Calculates expected fares and identifies discrepancies.
+        3. **transform_flight_data**
+        - Processes records in batches.
+        - Extracts departure date features.
+        - Classifies peak and non-peak seasons.
+        - Groups booking lead times.
+        - Calculates expected fares and identifies discrepancies.
 
-4. **load_postgres_data**
-   - Loads transformed records into PostgreSQL.
-   - Uses source record IDs to prevent duplicate inserts.
+        4. **load_postgres_data**
+        - Loads transformed records into PostgreSQL.
+        - Uses source record IDs to prevent duplicate inserts.
 
-## Data Quality
+        ## Data Quality
 
-Critical validation checks must pass before transformation.
+        Critical validation checks must pass before transformation.
 
-Fare discrepancies are reported as warnings and preserved
-for further investigation.
+        Fare discrepancies are reported as warnings and preserved
+        for further investigation.
 
-## Technologies
+        ## Technologies
 
-- Apache Airflow
-- Python
-- MySQL
-- PostgreSQL
-- Docker
-""",
-)
+        - Apache Airflow
+        - Python
+        - MySQL
+        - PostgreSQL
+        - Docker
+        """,
+        )
 def flight_price_pipeline():
 
     @task
