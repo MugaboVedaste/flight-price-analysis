@@ -4,6 +4,7 @@ from config.database import get_mysql_connection
 from src.validation.data_quality import (
     run_data_quality_checks,
     print_quality_report,
+    get_failed_checks,
 )
 
 
@@ -22,17 +23,7 @@ def main():
         print_quality_report(results)
 
         # Critical checks must pass.
-        critical_checks = [
-            "missing_values",
-            "invalid_fares",
-            "invalid_durations",
-        ]
-
-        failed_checks = [
-            check
-            for check in critical_checks
-            if results[check] > 0
-        ]
+        failed_checks = get_failed_checks(results)
 
         if failed_checks:
             raise RuntimeError(
@@ -41,7 +32,7 @@ def main():
 
         print("\nDATA QUALITY VALIDATION PASSED.")
 
-        if results["fare_discrepancies"] > 0:
+        if results.get("fare_discrepancies", 0) > 0:
             print(
                 "WARNING: Fare discrepancies detected. "
                 "Original fares have been preserved."

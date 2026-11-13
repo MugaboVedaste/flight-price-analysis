@@ -62,7 +62,7 @@ x-airflow-common:
     AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
     AIRFLOW__CORE__FERNET_KEY: ${FERNET_KEY}
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
-    AIRFLOW__CORE__LOAD_EXAMPLES: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-apiserver:8080/execution/'
     AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET:-airflow_jwt_secret}
     AIRFLOW__API_AUTH__JWT_ISSUER: ${AIRFLOW__API_AUTH__JWT_ISSUER:-airflow}
@@ -106,6 +106,8 @@ x-airflow-common:
     - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
     - ${AIRFLOW_PROJ_DIR:-.}/src:/opt/airflow/src
     - ${AIRFLOW_PROJ_DIR:-.}/data:/opt/airflow/data
+    # SQL schemas (the KPI task reads sql/kpi_schema.sql)
+    - ${AIRFLOW_PROJ_DIR:-.}/sql:/opt/airflow/sql
   depends_on:
     &airflow-common-depends-on
     redis:
@@ -367,6 +369,57 @@ services:
     volumes:
       - metabase-data:/metabase-data
     restart: unless-stopped
+  # ------------------------------------------------------------------
+  # OPTIONAL local databases (docker compose --profile local-db up -d).
+  # Not started by default: the pipeline normally uses the MySQL and
+  # PostgreSQL servers on the host (MYSQL_HOST / POSTGRES_HOST in .env).
+  # When using these, set MYSQL_HOST=mysql-staging and
+  # POSTGRES_HOST=analytics-db in .env. Host ports are 3307 / 5433 so
+  # they do not clash with databases already running on the host.
+  # Schemas in ./sql are applied automatically on first start.
+  # ------------------------------------------------------------------
+  mysql-staging:
+    image: mysql:8.4
+    profiles: ["local-db"]
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql-staging-data:/var/lib/mysql
+      - ./sql/mysql_schema.sql:/docker-entrypoint-initdb.d/01_mysql_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  analytics-db:
+    image: postgres:16
+    profiles: ["local-db"]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DATABASE}
+    ports:
+      - "5433:5432"
+    volumes:
+      - analytics-db-data:/var/lib/postgresql/data
+      - ./sql/postgres_schema.sql:/docker-entrypoint-initdb.d/01_postgres_schema.sql:ro
+      - ./sql/kpi_schema.sql:/docker-entrypoint-initdb.d/02_kpi_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
 volumes:
+  mysql-staging-data:
+  analytics-db-data:
   postgres-db-volume:
   metabase-data:

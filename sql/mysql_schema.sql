@@ -30,3 +30,13 @@ CREATE TABLE IF NOT EXISTS raw_flight_prices (
 
     ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Rows from the CSV that could not be parsed (missing/malformed numbers
+-- or dates). Written by the ingestion task and reported by validation.
+CREATE TABLE IF NOT EXISTS rejected_flight_rows (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    csv_row_number INT NOT NULL,
+    reason VARCHAR(500) NOT NULL,
+    raw_row TEXT,
+    rejected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);

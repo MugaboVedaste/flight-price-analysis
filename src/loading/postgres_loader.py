@@ -2,6 +2,7 @@
 import csv
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
 from pathlib import Path
 
 from config.database import get_postgres_connection
@@ -47,7 +48,12 @@ COLUMN_MAPPING = {
     "expected_fare_bdt": "expected_fare_bdt",
     "fare_discrepancy_bdt": "fare_discrepancy_bdt",
     "fare_discrepancy_flag": "fare_discrepancy_flag",
+    "record_hash": "record_hash",
 }
+
+TARGET_TABLE = "flight_analytics.transformed_flight_prices"
+
+SCHEMA_PATH = PROJECT_ROOT / "sql" / "postgres_schema.sql"
 
 INTEGER_COLUMNS = {
     "id",
@@ -112,18 +118,79 @@ def convert_value(column, value):
     return value.strip()
 
 
-def build_insert_query():
-    columns = list(COLUMN_MAPPING.values())
+# PostgreSQL allows at most 65,535 bind parameters per statement.
+MAX_PARAMETERS_PER_STATEMENT = 60000
 
-    column_sql = ", ".join(columns)
-    placeholders = ", ".join(["%s"] * len(columns))
+
+@lru_cache(maxsize=None)
+def build_insert_query(row_count=1):
+    """
+    Build a multi-row INSERT for `row_count` rows.
+
+    Plain `cursor.execute` with a multi-row VALUES list works with both
+    psycopg2 and psycopg 3 (Airflow's PostgresHook returns psycopg 3
+    connections, where psycopg2.extras.execute_values does not work).
+
+    ON CONFLICT DO NOTHING (no target) skips a row that violates ANY
+    unique constraint (source_record_id or record_hash). Source record
+    IDs come from the MySQL auto-increment column and change on every
+    re-ingestion, so record_hash is what really identifies a flight.
+    RETURNING lets us count the rows that were truly inserted.
+    """
+    column_sql = ", ".join(COLUMN_MAPPING.values())
+    row_sql = "(" + ", ".join(["%s"] * len(COLUMN_MAPPING)) + ")"
+    values_sql = ", ".join([row_sql] * row_count)
 
     return f"""
-        INSERT INTO flight_analytics.transformed_flight_prices
+        INSERT INTO {TARGET_TABLE}
         ({column_sql})
-        VALUES ({placeholders})
-        ON CONFLICT (source_record_id) DO NOTHING
+        VALUES {values_sql}
+        ON CONFLICT DO NOTHING
+        RETURNING 1
     """
+
+
+def _insert_batch(cursor, batch):
+    """Insert one batch and return how many rows were really inserted."""
+
+    rows_per_statement = max(
+        1, MAX_PARAMETERS_PER_STATEMENT // len(COLUMN_MAPPING)
+    )
+
+    inserted = 0
+
+    for start in range(0, len(batch), rows_per_statement):
+        chunk = batch[start:start + rows_per_statement]
+        parameters = [value for row in chunk for value in row]
+
+        cursor.execute(build_insert_query(len(chunk)), parameters)
+        inserted += len(cursor.fetchall())
+
+    return inserted
+
+
+def ensure_schema(cursor):
+    """
+    Create the analytics schema, table and indexes if they are missing.
+
+    sql/postgres_schema.sql only uses CREATE ... IF NOT EXISTS, so this
+    is safe on a database that is already set up, and a fresh database
+    works without a manual setup step.
+    """
+
+    if not SCHEMA_PATH.exists():
+        raise FileNotFoundError(
+            f"Schema file not found: {SCHEMA_PATH}. "
+            "Make sure the sql/ folder is available to the application "
+            "(in Docker it is mounted at /opt/airflow/sql)."
+        )
+
+    cursor.execute(SCHEMA_PATH.read_text(encoding="utf-8"))
+
+
+def _count_target_rows(cursor):
+    cursor.execute(f"SELECT COUNT(*) FROM {TARGET_TABLE}")
+    return cursor.fetchone()[0]
 
 
 def load_transformed_csv(
@@ -157,8 +224,6 @@ def load_transformed_csv(
     total_inserted = 0
     total_skipped = 0
 
-    insert_query = build_insert_query()
-
     try:
         print("Starting PostgreSQL data loading...")
 
@@ -168,6 +233,10 @@ def load_transformed_csv(
         print("Connected to PostgreSQL successfully.")
 
         cursor = connection.cursor()
+
+        ensure_schema(cursor)
+
+        rows_before = _count_target_rows(cursor)
 
         with csv_path.open(
             mode="r",
@@ -198,9 +267,7 @@ def load_transformed_csv(
                 total_read += 1
 
                 if len(batch) >= batch_size:
-                    cursor.executemany(insert_query, batch)
-
-                    inserted = cursor.rowcount
+                    inserted = _insert_batch(cursor, batch)
                     total_inserted += inserted
                     total_skipped += len(batch) - inserted
 
@@ -211,11 +278,20 @@ def load_transformed_csv(
                     batch.clear()
 
             if batch:
-                cursor.executemany(insert_query, batch)
-
-                inserted = cursor.rowcount
+                inserted = _insert_batch(cursor, batch)
                 total_inserted += inserted
                 total_skipped += len(batch) - inserted
+
+        # Verify consistency inside the transaction, before committing:
+        # the table must have grown by exactly the rows we inserted.
+        rows_after = _count_target_rows(cursor)
+
+        if rows_after != rows_before + total_inserted:
+            raise RuntimeError(
+                "PostgreSQL row-count verification failed: "
+                f"before={rows_before}, inserted={total_inserted}, "
+                f"after={rows_after}"
+            )
 
         # Commit the complete load as one transaction.
         connection.commit()
@@ -224,6 +300,7 @@ def load_transformed_csv(
         print(f"Total records read: {total_read:,}")
         print(f"Records inserted: {total_inserted:,}")
         print(f"Duplicate records skipped: {total_skipped:,}")
+        print(f"Rows in target table: {rows_after:,}")
         print(
             "Target table: "
             "flight_analytics.transformed_flight_prices"
@@ -234,6 +311,7 @@ def load_transformed_csv(
             "total_read": total_read,
             "total_inserted": total_inserted,
             "total_skipped": total_skipped,
+            "table_row_count": rows_after,
         }
 
     except Exception as error:

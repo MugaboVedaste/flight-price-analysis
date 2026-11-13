@@ -1,0 +1,7 @@
+# Providers the DAG imports. The stock apache/airflow image may not
+# include all of them. Install them with, for example:
+#   _PIP_ADDITIONAL_REQUIREMENTS="apache-airflow-providers-mysql apache-airflow-providers-postgres apache-airflow-providers-smtp"
+# or bake them into your own image.
+apache-airflow-providers-mysql
+apache-airflow-providers-postgres
+apache-airflow-providers-smtp

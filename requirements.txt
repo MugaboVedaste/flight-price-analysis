@@ -1,0 +1,6 @@
+# Local development / running the scripts and tests outside Docker.
+# (Airflow itself runs from the apache/airflow image in docker-compose.)
+mysql-connector-python
+psycopg2-binary
+python-dotenv
+pytest

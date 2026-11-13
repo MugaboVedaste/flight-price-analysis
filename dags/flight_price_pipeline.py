@@ -13,6 +13,7 @@ from src.ingestion.mysql_loader import load_csv_to_mysql
 from src.validation.data_quality import (
     run_data_quality_checks,
     print_quality_report,
+    get_failed_checks,
 )
 from src.transformation.run_transformation import run_transformation
 from src.loading.postgres_loader import load_transformed_csv
@@ -35,32 +36,43 @@ POSTGRES_CONN_ID = "postgres_flight_analytics"
 
 ALERT_EMAIL = os.getenv("GMAIL_ADDRESS")
 
-if not ALERT_EMAIL:
-    raise RuntimeError("GMAIL_ADDRESS is not configured.")
+# Failure e-mails are optional: without GMAIL_ADDRESS the DAG still
+# imports and runs, it just does not send alerts.
+failure_email = None
+
+if ALERT_EMAIL:
+    failure_email = SmtpNotifier(
+        smtp_conn_id="smtp_default",
+        from_email=ALERT_EMAIL,
+        to=ALERT_EMAIL,
+        subject="[Airflow Failure] {{ dag.dag_id }} - {{ ti.task_id }}",
+        html_content="""
+        <h2>Flight Price Pipeline Failure</h2>
+
+        <p><strong>DAG:</strong> {{ dag.dag_id }}</p>
+        <p><strong>Failed task:</strong> {{ ti.task_id }}</p>
+        <p><strong>Execution date:</strong> {{ logical_date }}</p>
+        <p><strong>Attempt:</strong> {{ ti.try_number }}</p>
+        <p><strong>Error:</strong></p>
+        <pre>{{ exception }}</pre>
+
+        <p>
+            <strong>Task logs:</strong>
+            <a href="{{ ti.log_url }}">View Airflow logs</a>
+        </p>
+        """,
+    )
 
 
-failure_email = SmtpNotifier(
-    smtp_conn_id="smtp_default",
-    from_email=ALERT_EMAIL,
-    to=ALERT_EMAIL,
-    subject="[Airflow Failure] {{ dag.dag_id }} - {{ ti.task_id }}",
-    html_content="""
-    <h2>Flight Price Pipeline Failure</h2>
 
-    <p><strong>DAG:</strong> {{ dag.dag_id }}</p>
-    <p><strong>Failed task:</strong> {{ ti.task_id }}</p>
-    <p><strong>Execution date:</strong> {{ logical_date }}</p>
-    <p><strong>Attempt:</strong> {{ ti.try_number }}</p>
-    <p><strong>Error:</strong></p>
-    <pre>{{ exception }}</pre>
+DEFAULT_ARGS = {
+    "owner": "data-engineering",
+    "retries": 2,
+    "retry_delay": timedelta(minutes=2),
+}
 
-    <p>
-        <strong>Task logs:</strong>
-        <a href="{{ ti.log_url }}">View Airflow logs</a>
-    </p>
-    """,
-)
-
+if failure_email is not None:
+    DEFAULT_ARGS["on_failure_callback"] = failure_email
 
 
 @dag(
@@ -71,12 +83,7 @@ failure_email = SmtpNotifier(
     schedule=None,
     catchup=False,
     max_active_runs=1,
-    default_args={
-        "owner": "data-engineering",
-        "retries": 2,
-        "retry_delay": timedelta(minutes=2),
-        "on_failure_callback": failure_email,
-    },
+    default_args=DEFAULT_ARGS,
 
     tags=["flight-price-analysis", "data-engineering"],
     doc_md="""
@@ -88,8 +95,8 @@ failure_email = SmtpNotifier(
         that processes flight price data from Bangladesh.
 
         The workflow extracts raw flight records, validates data quality,
-        transforms the records, and loads processed data into PostgreSQL
-        for analytical purposes.
+        transforms the records, loads processed data into PostgreSQL and
+        computes the KPI tables used for analysis.
 
         ## Pipeline Architecture
 
@@ -106,11 +113,15 @@ failure_email = SmtpNotifier(
         1. **ingest_flight_data**
         - Reads flight records from the source CSV.
         - Loads records into the MySQL staging database.
+        - Rows with missing/malformed numbers or dates are written to
+          `rejected_flight_rows` instead of crashing the load.
 
         2. **validate_flight_data**
-        - Checks missing critical values.
-        - Identifies invalid fares and durations.
-        - Reports fare discrepancies.
+        - Checks the required columns exist.
+        - Checks missing/blank values and non-empty categorical fields.
+        - Identifies invalid (negative) fares and durations.
+        - Identifies invalid airport codes / identical source and destination.
+        - Reports fare discrepancies and rejected rows as warnings.
 
         3. **transform_flight_data**
         - Processes records in batches.
@@ -120,8 +131,14 @@ failure_email = SmtpNotifier(
         - Calculates expected fares and identifies discrepancies.
 
         4. **load_postgres_data**
-        - Loads transformed records into PostgreSQL.
-        - Uses source record IDs to prevent duplicate inserts.
+        - Loads transformed records into PostgreSQL in bulk.
+        - Uses the record hash to skip duplicates, so re-runs are safe.
+        - Verifies the table row count before committing.
+
+        5. **run_flight_analytics**
+        - Computes the KPIs (average fare by airline, seasonal fare
+          variation, booking count by airline, most popular routes).
+        - Stores them in the `flight_analytics.kpi_*` tables.
 
         ## Data Quality
 
@@ -131,6 +148,8 @@ failure_email = SmtpNotifier(
         for further investigation.
 
         - The pipeline includes a hash of the record to detect duplicates.
+        - Pipeline fails when a critical check fails, or when more than
+          5% of the CSV rows were rejected at ingestion.
 
         ## Failure Handling
 
@@ -205,17 +224,7 @@ def flight_price_pipeline():
                     f"staged={results['total_records']}"
                 )
 
-            critical_checks = [
-                "missing_values",
-                "invalid_fares",
-                "invalid_durations",
-            ]
-
-            failed_checks = [
-                check
-                for check in critical_checks
-                if results[check] > 0
-            ]
+            failed_checks = get_failed_checks(results)
 
             if failed_checks:
                 raise RuntimeError(
@@ -231,6 +240,12 @@ def flight_price_pipeline():
 
             print("DATA QUALITY VALIDATION PASSED.")
 
+            if results["rejected_rows"] > 0:
+                print(
+                    f"WARNING: {results['rejected_rows']} CSV rows were "
+                    "rejected at ingestion (see rejected_flight_rows)."
+                )
+
             return {
                 "total_records": int(results["total_records"]),
                 "missing_values": int(results["missing_values"]),
@@ -238,6 +253,8 @@ def flight_price_pipeline():
                 "invalid_durations": int(
                     results["invalid_durations"]
                 ),
+                "invalid_cities": int(results["invalid_cities"]),
+                "rejected_rows": int(results["rejected_rows"]),
                 "fare_discrepancies": int(
                     results["fare_discrepancies"]
                 ),
@@ -356,6 +373,10 @@ def flight_price_pipeline():
                 "booking_lead_time_groups": len(
                     results["fare_by_booking_lead_time"]
                 ),
+                "seasons_analyzed": len(
+                    results["seasonal_fare_variation"]
+                ),
+                "kpi_rows_stored": results["stored_rows"],
                 "peak_flight_count": int(
                     results["peak_vs_non_peak_fare"]["peak_flight_count"]
                 ),
@@ -417,8 +438,12 @@ def flight_price_pipeline():
     3. Load records in batches of 1,000.
     4. Return the number of ingested records.
 
+    **Rejected rows:**
+    Rows with missing or malformed numeric/date values are stored in
+    `rejected_flight_rows` (row number, reason, raw row) and skipped.
+
     **Failure conditions:**
-    - Missing source file.
+    - Missing source file or required CSV columns.
     - MySQL connection failure.
     - Database insertion error.
     """
@@ -430,17 +455,24 @@ def flight_price_pipeline():
 
     **Database:** MySQL (`flight_staging`)
 
-    **Validation checks:**
-    - Missing critical values.
-    - Invalid flight fares.
-    - Invalid flight durations.
-    - Fare discrepancies between total fare and expected fare.
+    **Critical checks (fail the task):**
+    - Required columns exist (airline, source, destination,
+      base fare, tax & surcharge, total fare).
+    - Missing / blank values in required fields.
+    - Negative fares.
+    - Invalid durations (<= 0, or arrival not after departure).
+    - Invalid airport codes, or source equal to destination.
+    - More than 5% of CSV rows rejected at ingestion.
+
+    **Warnings (data preserved):**
+    - Fare discrepancies between total fare and base + tax.
+    - Blank descriptive fields, and rejected rows below the threshold.
 
     **Execution:**
     1. Retrieve data-quality statistics.
     2. Compare staged records with ingested records.
     3. Fail if critical checks detect invalid records.
-    4. Report fare discrepancies as warnings.
+    4. Report warnings.
 
     **Output:** Data-quality summary passed to the transformation task.
     """
@@ -484,12 +516,32 @@ def flight_price_pipeline():
     2. Establish a PostgreSQL connection.
     3. Convert CSV values into appropriate Python data types.
     4. Insert records in batches of 1,000.
-    5. Skip duplicate source record IDs using `ON CONFLICT DO NOTHING`.
-    6. Commit the transaction.
+    5. Bulk-insert with `execute_values`; rows that violate a unique
+       key (record hash / source id) are skipped by `ON CONFLICT DO NOTHING`.
+    6. Verify rows_after == rows_before + inserted, then commit.
 
     **Quality control:**
     Confirm that the number of records read matches
-    the number of records transformed.
+    the number of records transformed, and that the table grew by
+    exactly the number of inserted rows.
+    """
+
+    analytics_task.operator.doc_md = """
+    ### Flight Price Analytics (KPIs)
+
+    **Purpose:** Compute the KPIs and store them in PostgreSQL.
+
+    **Source:** `flight_analytics.transformed_flight_prices`
+
+    **Destination tables (`flight_analytics` schema):**
+    - `kpi_avg_fare_by_airline`
+    - `kpi_seasonal_fare_variation` and `kpi_peak_vs_non_peak_fare`
+    - `kpi_booking_count_by_airline`
+    - `kpi_popular_routes`
+    - `kpi_fare_by_booking_lead_time` (extra)
+
+    **Processing:** tables are emptied and refilled in one transaction,
+    so a failed run keeps the previous results.
     """
 
 

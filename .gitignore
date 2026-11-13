@@ -1,6 +1,8 @@
 
 # Python
 .venv/
+.airflow-venv/
+.airlflow-venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
